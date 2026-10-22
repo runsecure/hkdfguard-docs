@@ -24,9 +24,8 @@ npm run build # production build into build/
 
 ## Deployment
 
-```bash
-USE_SSH=true npm run deploy             # using SSH
-GIT_USER=<GitHub username> npm run deploy # using HTTPS
-```
-
-This builds the site and pushes it to the `gh-pages` branch for GitHub Pages.
+The site is published at <https://runsecure.github.io> (blog at `/blog`, docs at `/docs`).
+Every push to `main` runs [`.github/workflows/deploy.yml`](.github/workflows/deploy.yml),
+which builds the site and pushes the output to the
+[runsecure/runsecure.github.io](https://github.com/runsecure/runsecure.github.io) repo.
+Pull requests run the build only. One-time setup steps are at the top of the workflow file.
