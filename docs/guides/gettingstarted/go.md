@@ -32,10 +32,10 @@ You need:
   - Linux: in `tss` and `hkdfguard`.
   - macOS (user-scoped): the user who provisioned it.
 
-The Go library loads the native library only from its install location, after checking its
-location and ownership, its code signature (Windows and macOS), and the dynamic linker's
-environment. On Linux, verify the release's attestation before installing the package: the
-loader checks where the library is, not its contents. It never searches `PATH`, `LD_LIBRARY_PATH` or `DYLD_LIBRARY_PATH`.
+The Go library loads the native library only from its install location, after checking its location
+and ownership, its code signature (Windows and macOS), and the dynamic linker's environment. On
+Linux, verify the release's attestation before installing the package: the loader checks where the
+library is, not its contents. It never searches `PATH`, `LD_LIBRARY_PATH` or `DYLD_LIBRARY_PATH`.
 
 ## 1. Add the modules
 
@@ -99,27 +99,40 @@ func main() {
 	}
 	defer ring.Close()
 
-	protector, err := ring.CreateProtector("customer-notes")
-	if err != nil {
-		log.Fatal(err)
-	}
-	encrypted, err := protector.Encrypt(ctx, []byte("The launch code is 0000"))
-	if err != nil {
-		log.Fatal(err)
-	}
-	fmt.Println(encrypted)
+	formats := dek.NewDefaultFormatProvider()
+	aad := []byte("customer-notes") // what the value is for
 
-	size, err := protector.MaxDecryptedLength(ctx, encrypted)
+	// Encrypt under the current key. Encrypt zeroes the plaintext it is given.
+	version, key, err := ring.Current(ctx)
 	if err != nil {
 		log.Fatal(err)
 	}
-	buffer := make([]byte, size)
-	defer hkdfguard.Wipe(buffer)
-	n, err := protector.Decrypt(ctx, encrypted, buffer)
+	ciphertext, err := key.Encrypt(ctx, []byte("The launch code is 0000"), aad)
 	if err != nil {
 		log.Fatal(err)
 	}
-	fmt.Printf("%s\n", buffer[:n])
+	stored, err := formats.Format(ctx, hkdfguard.KeyTrackingValue{KeyVersion: version, Value: ciphertext})
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println(stored)
+
+	// Decrypt with the key for the value's own version.
+	parsed, err := formats.Parse(ctx, stored)
+	if err != nil {
+		log.Fatal(err)
+	}
+	key, err = ring.Get(ctx, parsed.KeyVersion)
+	if err != nil {
+		log.Fatal(err)
+	}
+	result := make([]byte, len(parsed.Value))
+	defer hkdfguard.Wipe(result)
+	n, err := key.Decrypt(ctx, parsed.Value, aad, result)
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Printf("%s\n", result[:n])
 }
 ```
 
@@ -132,18 +145,30 @@ The launch code is 0000
 
 What happened:
 
-- `dek.Build` asked the native library to generate a DEK and wrap it under your service's key,
-  then unwrapped it into memory that is zeroed when the ring closes. The plaintext DEK never
-  touched disk.
-- `enc::v1::...` is the stored form. `v1` is the key version, and the rest is the AES-GCM
-  ciphertext.
-- `"customer-notes"` is the protector's **purpose**. It is bound into every value, so a value
-  encrypted by one protector never decrypts under another.
-- `KeyRefreshInterval` re-checks the key every 60 seconds. If it stops being available,
-  encryption stops after three failed checks, until access returns. `hkdfguard.FailOpen()` keeps
-  the last good key instead.
-- Plaintext travels as `[]byte`, never as a `string`, so it can be zeroed. `Encrypt` zeroes what it
-  was given, and `hkdfguard.Wipe` clears your buffer.
+- `dek.Build` asked the native library to generate a DEK and wrap it under your service's key, then
+  unwrapped it into memory that is zeroed when the ring closes. The plaintext DEK never touched
+  disk.
+- `ring.Current` returns the **current version** and its **data encryption key**. `Encrypt` seals
+  the bytes with AES-256-GCM under that key, bound to the AAD, and zeroes the plaintext it was
+  given.
+- `DefaultFormatProvider.Format` turns the version and the ciphertext into the stored form,
+  `enc::v1::...`: `v1` is the key version, and the rest is the ciphertext in base64. However you
+  store a value, keep its version with it.
+- To decrypt, `ring.Get` returns the key **for the value's own version**, not the current one, so a
+  value encrypted before a rotation still decrypts. A result buffer as long as the ciphertext
+  always fits the plaintext.
+- The **AAD** says what the value is for. It is bound into the ciphertext, so decrypting with
+  different AAD fails authentication: a value encrypted for one purpose never decrypts as another.
+- `KeyRefreshInterval` re-checks the key every 60 seconds. If it stops being available, encryption
+  and decryption stop after three failed checks, until access returns.
+- Plaintext travels as `[]byte`, never as a `string`, so it can be zeroed: `hkdfguard.Wipe` clears
+  the result buffer when you are done.
+
+:::tip The shortcut: data protectors
+`ring.CreateProtector("customer-notes")` does these same steps for text values: it takes the current
+key, uses the UTF-8 of its name as the AAD, and formats the result. Values are interchangeable: a
+protector named `customer-notes` decrypts the value above, and the reverse.
+:::
 
 On macOS, the first run of each freshly built binary shows a keychain prompt: choose
 **Always Allow**. Sign your binary with a Developer ID, and the approval survives rebuilds. See
@@ -254,35 +279,43 @@ from memory.
 
 ## 5. Read the secrets back at runtime
 
-The `encryptedconfig` package reads values from any configuration source through a `Lookup`. Its
-helpers follow .NET's conventions, so one pipeline output serves every port:
+Each configuration value is an `enc::v1::...` string, encrypted for the configuration key it is
+stored under. Parse it, take the key for its version, and decrypt it with that configuration
+key's AAD:
 
 ```go
-import "github.com/runsecure/hkdfguard-go/encryptedconfig"
-
-values, err := encryptedconfig.FlattenJSON(appsettingsJSON) // {"A":{"B":...}} becomes "A:B"
+encrypted := settings["ConnectionStrings:Admin"] // "enc::v1::..."
+value, err := dek.NewDefaultFormatProvider().Parse(ctx, encrypted)
 if err != nil {
 	return err
 }
-lookup, err := encryptedconfig.NewMapLookup(values) // matches keys ignoring ASCII case
+key, err := ring.Get(ctx, value.KeyVersion)
 if err != nil {
 	return err
 }
-// Or read environment variables: encryptedconfig.EnvLookup("APP_") reads "A:B" from APP_A__B.
-
-secrets := encryptedconfig.New(ring, lookup)
-size, ok, err := secrets.MaxDecryptedLength(ctx, "ConnectionStrings:Admin")
-if err != nil || !ok {
-	return fmt.Errorf("ConnectionStrings:Admin: %v", err)
+aad, err := hkdfguard.ConfigurationAAD("ConnectionStrings:Admin")
+if err != nil {
+	return err
 }
-buffer := make([]byte, size)
-defer hkdfguard.Wipe(buffer)
-n, err := secrets.Decrypt(ctx, "ConnectionStrings:Admin", buffer)
-// use buffer[:n]
+result := make([]byte, len(value.Value))
+defer hkdfguard.Wipe(result)
+n, err := key.Decrypt(ctx, value.Value, aad, result)
+if err != nil {
+	return err
+}
+// use result[:n], the UTF-8 bytes of the secret
 ```
 
-The key ring must have the release's key file registered at the version the pipeline used,
-here `1`.
+`hkdfguard.ConfigurationAAD` gives the AAD the pipeline bound the value to. A value copied to a
+different configuration key fails authentication. The key ring must have the release's key file
+registered at the version the pipeline used, here `1`.
+
+:::tip The shortcut: `encryptedconfig`
+The `encryptedconfig` package does these same steps over any configuration source, through a
+lookup. `encryptedconfig.FlattenJSON` and `NewMapLookup` read an `appsettings.json`, and
+`EnvLookup("APP_")` reads `A:B` from `APP_A__B`, as .NET does:
+`encryptedconfig.New(ring, lookup).Decrypt(ctx, "ConnectionStrings:Admin", buffer)`.
+:::
 
 ## 6. Configure the ring from appsettings.json
 

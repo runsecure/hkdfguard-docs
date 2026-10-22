@@ -69,8 +69,12 @@ dotnet add package HkdfGuard.KeyWrapping.V1
 Replace `Program.cs` with:
 
 ```csharp
+using System.Security.Cryptography;
+using System.Text;
+using HkdfGuard.Abstractions;
 using HkdfGuard.CryptoProvider.AesGcm256;
 using HkdfGuard.DataEncryptionKey;
+using HkdfGuard.DataEncryptionKey.FormatProvider;
 using HkdfGuard.KeyWrapping.V1;
 
 await using var ring = await new KeyRingBuilder()
@@ -81,13 +85,28 @@ await using var ring = await new KeyRingBuilder()
     .WithEphemeralKey(version: 1)
     .BuildAsync();
 
-var protector = ring.CreateProtector("customer-notes");
-string encrypted = protector.Encrypt("The launch code is 0000");
-Console.WriteLine(encrypted);
+var formats = new DefaultFormatProvider();
+byte[] aad = Encoding.UTF8.GetBytes("customer-notes"); // what the value is for
 
-Span<char> buffer = stackalloc char[protector.GetMaxDecryptedLength(encrypted)];
-int written = protector.Decrypt(encrypted, buffer);
-Console.WriteLine(buffer[..written].ToString());
+// Encrypt under the current key. Encrypt zeroes the plaintext it is given.
+var (version, key) = ring.GetCurrent();
+byte[] ciphertext = key.Encrypt(Encoding.UTF8.GetBytes("The launch code is 0000"), aad);
+string stored = formats.Format(new KeyTrackingValue { KeyVersion = version, Value = ciphertext });
+Console.WriteLine(stored);
+
+// Decrypt with the key for the value's own version.
+KeyTrackingValue parsed = formats.Parse(stored);
+IDataEncryptionKey dek = ring.Get(parsed.KeyVersion);
+byte[] result = new byte[parsed.Value.Length];
+try
+{
+    int written = dek.Decrypt(parsed.Value, aad, result);
+    Console.WriteLine(Encoding.UTF8.GetString(result, 0, written)); // a string for the demo only
+}
+finally
+{
+    CryptographicOperations.ZeroMemory(result);
+}
 ```
 
 Run it with `dotnet run`:
@@ -99,14 +118,27 @@ The launch code is 0000
 
 What happened:
 
-- `BuildAsync` asked the native library to generate a DEK and wrap it under your service's key,
-  then unwrapped it into pinned memory. The plaintext DEK never touched disk.
-- `enc::v1::...` is the stored form. `v1` is the key version, and the rest is the AES-GCM
-  ciphertext.
-- `"customer-notes"` is the protector's **purpose**. It is bound into every value, so a value
-  encrypted by one protector never decrypts under another.
+- `BuildAsync` asked the native library to generate a DEK and wrap it under your service's key, then
+  unwrapped it into pinned memory. The plaintext DEK never touched disk.
+- `ring.GetCurrent()` returns the **current version** and its **data encryption key**.
+  `IDataEncryptionKey.Encrypt` seals the bytes with AES-256-GCM under that key, bound to the AAD,
+  and zeroes the plaintext it was given.
+- `DefaultFormatProvider.Format` turns the version and the ciphertext into the stored form,
+  `enc::v1::...`: `v1` is the key version, and the rest is the ciphertext in base64. However you
+  store a value, keep its version with it.
+- To decrypt, `ring.Get(version)` returns the key **for the value's own version**, not the current
+  one, so a value encrypted before a rotation still decrypts. A result buffer as long as the
+  ciphertext always fits the plaintext.
+- The **AAD** says what the value is for. It is bound into the ciphertext, so decrypting with
+  different AAD fails authentication: a value encrypted for one purpose never decrypts as another.
 - `WithKeyRefreshInterval(60)` re-checks the key every 60 seconds. If it stops being available,
-  encryption stops after three failed checks, until access returns.
+  encryption and decryption stop after three failed checks, until access returns.
+
+:::tip The shortcut: data protectors
+`ring.CreateProtector("customer-notes")` does these same steps for text values: it takes the current
+key, uses the UTF-8 of its name as the AAD, and formats the result. Values are interchangeable: a
+protector named `customer-notes` decrypts the value above, and the reverse.
+:::
 
 On macOS, the first run shows a keychain prompt for `dotnet`: choose **Always Allow**. See
 [the first unwrap asks for permission](macos.md#the-first-unwrap-asks-for-permission) for why a
@@ -208,31 +240,40 @@ as a command-line argument or an environment variable. Never copy `GetKeyAsBase6
 
 ## 5. Read the secrets back at runtime
 
-`ProtectedConfigurationRoot` wraps your `IConfigurationRoot`. Configuration only ever holds the
-ciphertext, and `Decrypt` reads it fresh on every call, so a reload takes effect at once:
+Each configuration value is an `enc::v1::...` string, encrypted for the configuration key it is
+stored under. Parse it, take the key for its version, and decrypt it with that configuration
+key's AAD:
 
 ```csharp
-using HkdfGuard.EncryptedConfiguration;
+using System.Security.Cryptography;
+using HkdfGuard.Abstractions;
+using HkdfGuard.DataEncryptionKey.FormatProvider;
 
-var secrets = new ProtectedConfigurationRoot(configurationRoot, ring);
+string encrypted = configuration["ConnectionStrings:Admin"]!; // "enc::v1::..."
+KeyTrackingValue value = new DefaultFormatProvider().Parse(encrypted);
+IDataEncryptionKey dek = ring.Get(value.KeyVersion);
 
-if (secrets.TryGetMaxDecryptedLength("ConnectionStrings:Admin", out int maxLength))
+byte[] result = new byte[value.Value.Length];
+try
 {
-    char[] value = new char[maxLength];
-    try
-    {
-        int length = secrets.Decrypt("ConnectionStrings:Admin", value);
-        // use value[..length]
-    }
-    finally
-    {
-        Array.Clear(value);
-    }
+    int written = dek.Decrypt(value.Value, ProtectedConfigurationPurpose.AadFor("ConnectionStrings:Admin"), result);
+    // use result[..written], the UTF-8 bytes of the secret
+}
+finally
+{
+    CryptographicOperations.ZeroMemory(result);
 }
 ```
 
-The key ring must have the release's key file registered at the version the pipeline used,
-here `1`.
+`ProtectedConfigurationPurpose.AadFor` gives the AAD the pipeline bound the value to. A value
+copied to a different configuration key fails authentication. The key ring must have the release's
+key file registered at the version the pipeline used, here `1`.
+
+:::tip The shortcut: `ProtectedConfigurationRoot`
+`HkdfGuard.EncryptedConfiguration` does these same steps over an `IConfigurationRoot`: `new
+ProtectedConfigurationRoot(configurationRoot, ring).Decrypt("ConnectionStrings:Admin", buffer)`. It
+reads the value fresh on every call, so a configuration reload takes effect at once.
+:::
 
 ## 6. Configure the ring from appsettings.json
 
