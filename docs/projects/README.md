@@ -1,6 +1,6 @@
 # Projects
 
-Add one page per HkdfGuard project, copying [_template.md](_template.md).
+Add one page per HkdfGuard project, copying `docs/projects/_template.md`.
 
 | Project | Description | Docs |
 | --- | --- | --- |

@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 300" role="img" aria-label="The KEK never leaves the hardware; only the wrapped DEK touches disk" font-family="system-ui, -apple-system, Segoe UI, Roboto, sans-serif" font-size="13">
+  <defs>
+    <marker id="hk-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0 0L10 5L0 10z" fill="#8a8f98"/>
+    </marker>
+  </defs>
+  <rect width="760" height="300" rx="12" fill="#ffffff"/>
+  <text x="24" y="32" font-size="15" font-weight="600" fill="#1c1e21">The KEK never leaves the hardware; only the wrapped DEK touches disk</text>
+
+  <g fill="none" stroke="#8a8f98" stroke-width="1.25">
+    <path d="M244 108H270" marker-end="url(#hk-arrow)"/>
+    <path d="M490 108H516" marker-end="url(#hk-arrow)"/>
+    <path d="M380 156V216" marker-start="url(#hk-arrow)" marker-end="url(#hk-arrow)"/>
+    <path d="M626 156V216" marker-start="url(#hk-arrow)" marker-end="url(#hk-arrow)"/>
+  </g>
+
+  <g>
+    <rect x="24" y="60" width="220" height="96" rx="8" fill="none" stroke="#8a8f98" stroke-width="1.25"/>
+    <text x="40" y="84" font-weight="600" fill="#1c1e21">1 · Pipeline</text>
+    <text x="40" y="106" font-size="11.5" fill="#1c1e21">Generates a fresh DEK</text>
+    <text x="40" y="122" font-size="11.5" fill="#1c1e21">Encrypts the app's config values</text>
+    <text x="40" y="138" font-size="11.5" fill="#606770">as enc::v1::… strings</text>
+  </g>
+  <g>
+    <rect x="270" y="60" width="220" height="96" rx="8" fill="none" stroke="#8a8f98" stroke-width="1.25"/>
+    <text x="286" y="84" font-weight="600" fill="#1c1e21">2 · Deploy to the host</text>
+    <text x="286" y="106" font-size="11.5" fill="#1c1e21">DEK wrapped under the KEK</text>
+    <text x="286" y="122" font-size="11.5" fill="#1c1e21">into a key file on disk</text>
+    <text x="286" y="138" font-size="11.5" fill="#606770">Plaintext DEK discarded</text>
+  </g>
+  <g>
+    <rect x="516" y="60" width="220" height="96" rx="8" fill="none" stroke="#8a8f98" stroke-width="1.25"/>
+    <text x="532" y="84" font-weight="600" fill="#1c1e21">3 · Application start</text>
+    <text x="532" y="106" font-size="11.5" fill="#1c1e21">Unwraps the key file</text>
+    <text x="532" y="122" font-size="11.5" fill="#1c1e21">Holds the DEK in pinned memory</text>
+    <text x="532" y="138" font-size="11.5" fill="#606770">Decrypts config, zeroes on exit</text>
+  </g>
+
+  <text x="390" y="190" font-size="11.5" fill="#606770">ECDH</text>
+  <text x="636" y="190" font-size="11.5" fill="#606770">ECDH</text>
+
+  <g>
+    <rect x="270" y="216" width="466" height="60" rx="8" fill="#2e8555" fill-opacity="0.12" stroke="#2e8555" stroke-width="2"/>
+    <text x="503" y="241" text-anchor="middle" font-weight="600" fill="#1c1e21">Security hardware: TPM, Secure Enclave or HSM</text>
+    <text x="503" y="261" text-anchor="middle" font-size="11.5" fill="#1c1e21">Holds each service's P-256 KEK; the private key never leaves</text>
+  </g>
+</svg>
