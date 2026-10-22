@@ -3,8 +3,8 @@ import {themes as prismThemes} from 'prism-react-renderer';
 
 /** @type {import('@docusaurus/types').Config} */
 const config = {
-  title: 'HkdfGuard',
-  tagline: 'Documentation and blog for HkdfGuard',
+  title: 'RunSecure',
+  tagline: 'Documentation and blog for HkdfGuard and other RunSecure Projects',
   favicon: 'img/favicon.ico',
   url: 'https://runsecure.github.io',
   // Served from the org site (runsecure/runsecure.github.io), not this repo's project site.
@@ -23,11 +23,11 @@ const config = {
         docs: {
           sidebarPath: './sidebars.js',
           routeBasePath: '/docs',
-          editUrl: 'https://github.com/runsecure/hkdfguard-docs/tree/main/',
+          editUrl: 'https://github.com/runsecure/runsecure.github.io/tree/main/',
         },
         blog: {
           showReadingTime: true,
-          editUrl: 'https://github.com/runsecure/hkdfguard-docs/tree/main/',
+          editUrl: 'https://github.com/runsecure/runsecure.github.io/tree/main/',
         },
         theme: {customCss: './src/css/custom.css'},
       }),
@@ -39,7 +39,7 @@ const config = {
       items: [
         {type: 'docSidebar', sidebarId: 'docsSidebar', position: 'left', label: 'Docs'},
         {to: '/blog', label: 'Blog', position: 'left'},
-        {href: 'https://github.com/runsecure/hkdfguard-docs', label: 'GitHub', position: 'right'},
+        {href: 'https://github.com/runsecure/runsecure.github.io', label: 'GitHub', position: 'right'},
       ],
     },
     footer: {
