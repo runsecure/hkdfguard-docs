@@ -34,6 +34,10 @@ const config = {
     ],
   ],
   themeConfig: {
+    colorMode: {
+      defaultMode: 'dark',
+      disableSwitch: true,
+    },
     navbar: {
       title: 'HkdfGuard',
       items: [
