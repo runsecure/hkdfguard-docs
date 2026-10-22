@@ -1,6 +1,6 @@
-# hkdfguard-docs
+# runsecure.github.io
 
-Documentation library, wiki and blog for the HkdfGuard projects, built with [Docusaurus](https://docusaurus.io/).
+Documentation library, wiki and blog for the HkdfGuard projects, built with [Docusaurus](https://docusaurus.io/) and published at <https://runsecure.github.io>.
 
 Start at [docs/index.md](docs/index.md).
 
@@ -25,7 +25,8 @@ npm run build # production build into build/
 ## Deployment
 
 The site is published at <https://runsecure.github.io> (blog at `/blog`, docs at `/docs`).
-Every push to `main` runs [`.github/workflows/deploy.yml`](.github/workflows/deploy.yml),
-which builds the site and pushes the output to the
-[runsecure/runsecure.github.io](https://github.com/runsecure/runsecure.github.io) repo.
-Pull requests run the build only. One-time setup steps are at the top of the workflow file.
+Set GitHub Pages to use **GitHub Actions** as its source in the repository's
+Settings > Pages. Every push to `main` runs
+[`.github/workflows/deploy.yml`](.github/workflows/deploy.yml), which builds and
+deploys the site directly to GitHub Pages. Pull requests run the build without
+deploying.
