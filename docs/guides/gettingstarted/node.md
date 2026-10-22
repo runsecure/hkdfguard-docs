@@ -80,7 +80,7 @@ Write `main.ts`:
 ```ts
 import { wipe } from '@runsecure/hkdfguard-abstractions';
 import { AesGcmCryptoProviderFactory } from '@runsecure/hkdfguard-cryptoprovider-aesgcm256';
-import { buildKeyRing } from '@runsecure/hkdfguard-dek';
+import { buildKeyRing, DefaultFormatProvider } from '@runsecure/hkdfguard-dek';
 import { NativeKeyWrapperV1 } from '@runsecure/hkdfguard-keywrapping-native-v1';
 
 const ring = await buildKeyRing({
@@ -90,16 +90,24 @@ const ring = await buildKeyRing({
   ephemeralKeys: [1],
 });
 try {
-  const protector = ring.createProtector('customer-notes');
-  const encrypted = protector.encrypt(new TextEncoder().encode('The launch code is 0000'));
-  console.log(encrypted);
+  const formats = new DefaultFormatProvider();
+  const aad = new TextEncoder().encode('customer-notes'); // what the value is for
 
-  const buffer = new Uint8Array(protector.maxDecryptedLength(encrypted));
+  // Encrypt under the current key. encrypt zeroes the plaintext it is given.
+  const { version, key } = ring.getCurrent();
+  const ciphertext = key.encrypt(new TextEncoder().encode('The launch code is 0000'), aad);
+  const stored = formats.format({ keyVersion: version, value: ciphertext });
+  console.log(stored);
+
+  // Decrypt with the key for the value's own version.
+  const parsed = formats.parse(stored);
+  const dek = ring.get(parsed.keyVersion);
+  const result = new Uint8Array(parsed.value.length);
   try {
-    const n = protector.decrypt(encrypted, buffer);
-    console.log(new TextDecoder().decode(buffer.subarray(0, n)));
+    const n = dek.decrypt(parsed.value, result, aad);
+    console.log(new TextDecoder().decode(result.subarray(0, n))); // a string for the demo only
   } finally {
-    wipe(buffer);
+    wipe(result);
   }
 } finally {
   await ring.close();
@@ -116,17 +124,29 @@ The launch code is 0000
 What happened:
 
 - `buildKeyRing` asked the native library to generate a DEK and wrap it under your service's key,
-  then unwrapped it into memory that is zeroed when the ring closes. The plaintext DEK never
-  touched disk.
-- `enc::v1::...` is the stored form. `v1` is the key version, and the rest is the AES-GCM
-  ciphertext.
-- `'customer-notes'` is the protector's **purpose**. It is bound into every value, so a value
-  encrypted by one protector never decrypts under another.
+  then unwrapped it into memory that is zeroed when the ring closes. The plaintext DEK never touched
+  disk.
+- `ring.getCurrent()` returns the **current version** and its **data encryption key**. `encrypt`
+  seals the bytes with AES-256-GCM under that key, bound to the AAD, and zeroes the plaintext it was
+  given.
+- `DefaultFormatProvider.format` turns the version and the ciphertext into the stored form,
+  `enc::v1::...`: `v1` is the key version, and the rest is the ciphertext in base64. However you
+  store a value, keep its version with it.
+- To decrypt, `ring.get(version)` returns the key **for the value's own version**, not the current
+  one, so a value encrypted before a rotation still decrypts. A result buffer as long as the
+  ciphertext always fits the plaintext.
+- The **AAD** says what the value is for. It is bound into the ciphertext, so decrypting with
+  different AAD fails authentication: a value encrypted for one purpose never decrypts as another.
 - `keyRefreshInterval: 60` re-checks the key every 60 seconds. If it stops being available,
-  encryption stops after three failed checks, until access returns.
-  `RefreshFailurePolicy.failOpen()` keeps the last good key instead.
-- Plaintext travels as a `Uint8Array`, so it can be zeroed. `encrypt` also accepts a `string`, but a
-  JavaScript string can't be cleared from memory, so prefer bytes for anything secret.
+  encryption and decryption stop after three failed checks, until access returns.
+- Plaintext travels as a `Uint8Array`, so it can be zeroed: `wipe` clears the result buffer when
+  you are done.
+
+:::tip The shortcut: data protectors
+`ring.createProtector('customer-notes')` does these same steps for text values: it takes the current
+key, uses the UTF-8 of its name as the AAD, and formats the result. Values are interchangeable: a
+protector named `customer-notes` decrypts the value above, and the reverse.
+:::
 
 On macOS, the first run shows a keychain prompt for `node`: choose **Always Allow**. That
 approval covers every script that `node` executable runs as that user, and a new Node.js version
@@ -217,32 +237,37 @@ environment variable, and never decode `keyBase64()` into a `string` (with `Text
 
 ## 5. Read the secrets back at runtime
 
-`EncryptedConfigurationReader` reads values from any configuration source through a lookup
-function. The helpers follow .NET's conventions, so one pipeline output serves every port:
+Each configuration value is an `enc::v1::...` string, encrypted for the configuration key it is
+stored under. Parse it, take the key for its version, and decrypt it with that configuration
+key's AAD:
 
 ```ts
-import { readFileSync } from 'node:fs';
-import { wipe } from '@runsecure/hkdfguard-abstractions';
-import { EncryptedConfigurationReader, flattenJson, mapLookup } from '@runsecure/hkdfguard-encryptedconfig';
+import { configurationAad, wipe } from '@runsecure/hkdfguard-abstractions';
+import { DefaultFormatProvider } from '@runsecure/hkdfguard-dek';
 
-const appsettings = readFileSync('appsettings.json', 'utf8');
-const secrets = new EncryptedConfigurationReader(ring, mapLookup(flattenJson(appsettings)));
-// Or read environment variables: envLookup('APP_') reads "A:B" from APP_A__B.
+const encrypted = settings['ConnectionStrings:Admin']; // "enc::v1::..."
+const value = new DefaultFormatProvider().parse(encrypted);
+const dek = ring.get(value.keyVersion);
 
-const length = await secrets.maxDecryptedLength('ConnectionStrings:Admin');
-if (length !== undefined) {
-  const buffer = new Uint8Array(length);
-  try {
-    const n = await secrets.decrypt('ConnectionStrings:Admin', buffer);
-    // use buffer.subarray(0, n)
-  } finally {
-    wipe(buffer);
-  }
+const result = new Uint8Array(value.value.length);
+try {
+  const n = dek.decrypt(value.value, result, configurationAad('ConnectionStrings:Admin'));
+  // use result.subarray(0, n), the UTF-8 bytes of the secret
+} finally {
+  wipe(result);
 }
 ```
 
-The key ring must have the release's key file registered at the version the pipeline used,
-here `1`.
+`configurationAad` gives the AAD the pipeline bound the value to. A value copied to a different
+configuration key fails authentication. The key ring must have the release's key file registered
+at the version the pipeline used, here `1`.
+
+:::tip The shortcut: `EncryptedConfigurationReader`
+`@runsecure/hkdfguard-encryptedconfig` does these same steps over any configuration source, through
+a lookup function. `flattenJson` and `mapLookup` read an `appsettings.json`, and `envLookup('APP_')`
+reads `A:B` from `APP_A__B`, as .NET does: `await new EncryptedConfigurationReader(ring,
+mapLookup(flattenJson(json))).decrypt('ConnectionStrings:Admin', buffer)`.
+:::
 
 ## 6. Configure the ring from appsettings.json
 

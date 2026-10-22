@@ -104,9 +104,13 @@ instead.
 ## 2. Check the setup with an in-memory key
 
 ```java
+import io.github.runsecure.hkdfguard.abstractions.DataEncryptionKey;
+import io.github.runsecure.hkdfguard.abstractions.KeyTrackingValue;
 import io.github.runsecure.hkdfguard.cryptoprovider.aesgcm256.AesGcmCryptoProviderFactoryImpl;
 import io.github.runsecure.hkdfguard.dataencryptionkey.KeyRingBuilder;
+import io.github.runsecure.hkdfguard.dataencryptionkey.formatprovider.DefaultFormatProviderImpl;
 import io.github.runsecure.hkdfguard.keywrapping.v1.NativeHkdfKeyWrapperV1Impl;
+import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 
 public final class Demo {
@@ -120,16 +124,24 @@ public final class Demo {
                 .buildAsync()
                 .join()) {
 
-            var protector = ring.createProtector("customer-notes");
-            String encrypted = protector.encrypt("The launch code is 0000");
-            System.out.println(encrypted);
+            var formats = new DefaultFormatProviderImpl();
+            byte[] aad = "customer-notes".getBytes(StandardCharsets.UTF_8); // what the value is for
 
-            var buffer = new char[protector.getMaxDecryptedLength(encrypted)];
+            // Encrypt under the current key. encrypt zeroes the plaintext it is given.
+            var current = ring.getCurrent();
+            byte[] ciphertext = current.key().encrypt("The launch code is 0000".getBytes(StandardCharsets.UTF_8), aad);
+            String stored = formats.format(new KeyTrackingValue(current.version(), ciphertext));
+            System.out.println(stored);
+
+            // Decrypt with the key for the value's own version.
+            KeyTrackingValue parsed = formats.parse(stored);
+            DataEncryptionKey dek = ring.get(parsed.keyVersion());
+            byte[] result = new byte[parsed.value().length];
             try {
-                int length = protector.decrypt(encrypted, buffer);
-                System.out.println(new String(buffer, 0, length));
+                int length = dek.decrypt(parsed.value(), aad, result);
+                System.out.println(new String(result, 0, length, StandardCharsets.UTF_8)); // a String for the demo only
             } finally {
-                Arrays.fill(buffer, '\0');
+                Arrays.fill(result, (byte) 0);
             }
         }
     }
@@ -143,18 +155,31 @@ The launch code is 0000
 
 What happened:
 
-- `buildAsync` asked the native library to generate a DEK and wrap it under your service's key,
-  then unwrapped it into memory that is zeroed when the ring closes. The plaintext DEK never
-  touched disk.
-- `enc::v1::...` is the stored form. `v1` is the key version, and the rest is the AES-GCM
-  ciphertext.
-- `"customer-notes"` is the protector's **purpose**. It is bound into every value, so a value
-  encrypted by one protector never decrypts under another.
-- `withKeyRefreshInterval(60)` re-checks the key every 60 seconds, on a virtual thread. If it
-  stops being available, encryption stops after three failed checks, until access returns.
+- `buildAsync` asked the native library to generate a DEK and wrap it under your service's key, then
+  unwrapped it into memory that is zeroed when the ring closes. The plaintext DEK never touched
+  disk.
+- `ring.getCurrent()` returns the **current version** and its **data encryption key**.
+  `DataEncryptionKey.encrypt` seals the bytes with AES-256-GCM under that key, bound to the AAD, and
+  zeroes the plaintext it was given.
+- `DefaultFormatProviderImpl.format` turns the version and the ciphertext into the stored form,
+  `enc::v1::...`: `v1` is the key version, and the rest is the ciphertext in base64. However you
+  store a value, keep its version with it.
+- To decrypt, `ring.get(version)` returns the key **for the value's own version**, not the current
+  one, so a value encrypted before a rotation still decrypts. A result buffer as long as the
+  ciphertext always fits the plaintext.
+- The **AAD** says what the value is for. It is bound into the ciphertext, so decrypting with
+  different AAD fails authentication: a value encrypted for one purpose never decrypts as another.
+- `withKeyRefreshInterval(60)` re-checks the key every 60 seconds. If it stops being available,
+  encryption and decryption stop after three failed checks, until access returns.
 
 Async methods return a `CompletableFuture`. Argument errors throw from the call itself, and a
 failure revealing a key completes the future exceptionally.
+
+:::tip The shortcut: data protectors
+`ring.createProtector("customer-notes")` does these same steps for text values: it takes the current
+key, uses the UTF-8 of its name as the AAD, and formats the result. Values are interchangeable: a
+protector named `customer-notes` decrypts the value above, and the reverse.
+:::
 
 On macOS, the first run shows a keychain prompt for `java`: choose **Always Allow**. That approval
 covers every program that `java` runs as that user. See
@@ -254,6 +279,30 @@ from memory. Closing the pipeline protector zeroes the key.
 
 ## 5. Read the secrets back
 
+Each configuration value is an `enc::v1::...` string, encrypted for the property it is stored
+under. Parse it, take the key for its version, and decrypt it with that property's AAD:
+
+```java
+import io.github.runsecure.hkdfguard.abstractions.ProtectedConfigurationPurpose;
+
+String encrypted = environment.getProperty("spring.datasource.password"); // "enc::v1::..."
+KeyTrackingValue value = new DefaultFormatProviderImpl().parse(encrypted);
+DataEncryptionKey dek = ring.get(value.keyVersion());
+
+byte[] result = new byte[value.value().length];
+try {
+    int length = dek.decrypt(value.value(), ProtectedConfigurationPurpose.aadFor("spring.datasource.password"), result);
+    // use result[0..length), the UTF-8 bytes of the secret
+} finally {
+    Arrays.fill(result, (byte) 0);
+}
+```
+
+`ProtectedConfigurationPurpose.aadFor` gives the AAD the pipeline bound the value to. A value
+copied to a different property fails authentication. Encrypt and read each value under the same
+name: for Spring, its canonical form, such as `my-service.api-key`. The key ring must have the
+release's key file registered at the version the pipeline used, here `1`.
+
 ### With Spring Boot
 
 Add `hkdfguard-spring-boot-starter` (Spring Boot 4.1), and configure the ring under `hkdfguard`:
@@ -271,8 +320,9 @@ The starter builds the ring at startup when `hkdfguard.service-name` is set, and
 context. Invalid settings, or a misspelt property under `hkdfguard`, fail startup with every
 problem listed.
 
-Inject `ProtectedEnvironment` to read protected values from any property source. `@Value` and
-`getProperty` still return the ciphertext; `decrypt` reads the property fresh on every call:
+**The shortcut: `ProtectedEnvironment`.** Inject it, and it does the steps above for any property
+source. `@Value` and `getProperty` still return the ciphertext; `decrypt` reads the property fresh
+on every call:
 
 ```java
 var maxLength = protectedEnvironment.findMaxDecryptedLength("spring.datasource.password").orElseThrow();
@@ -292,22 +342,6 @@ With Actuator, `/actuator/health` gains an `hkdfguard` component. It reports `DO
 current key can't protect new values.
 
 ### Without Spring
-
-Create a protector for the configuration key's purpose, and decrypt the value from wherever your
-configuration lives:
-
-```java
-import io.github.runsecure.hkdfguard.abstractions.ProtectedConfigurationPurpose;
-
-var protector = ring.createProtector(ProtectedConfigurationPurpose.forKey("ConnectionStrings:Admin"));
-var result = new char[protector.getMaxDecryptedLength(encrypted)];
-try {
-    int length = protector.decrypt(encrypted, result);
-    // use result[0..length)
-} finally {
-    Arrays.fill(result, '\0');
-}
-```
 
 To describe the ring in a settings file, `HkdfGuardOptions.fromMap` reads a parsed section,
 including a .NET `appsettings.json` `HkdfGuard` section unchanged. `requireValid()` reports every

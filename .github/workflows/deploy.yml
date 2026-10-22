@@ -1,4 +1,5 @@
-# Builds the site on every pull request and publishes main to GitHub Pages.
+# Builds the site on every pull request, and publishes it to GitHub Pages on every push to main -
+# including every merged pull request - or when run by hand.
 #
 # One-time setup:
 #   1. In runsecure/runsecure.github.io, open Settings > Pages.
@@ -14,22 +15,26 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: pages
-  cancel-in-progress: false
-
 jobs:
   build:
     runs-on: ubuntu-latest
+    # Builds are grouped per branch or pull request, never with deployments: a pull request's build
+    # must not hold up, or be mistaken for, the deployment of a merge. A newer push to the same pull
+    # request supersedes its build in progress; builds of main always finish.
+    concurrency:
+      group: build-${{ github.ref }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
       - run: npm ci
       - run: npm run build
-      - uses: actions/upload-pages-artifact@v3
+      # Only a build that will be deployed needs the Pages artifact.
+      - if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        uses: actions/upload-pages-artifact@v3
         with:
           path: build
 
@@ -37,6 +42,11 @@ jobs:
     needs: build
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    # One deployment at a time, in order. A deployment in progress is never cancelled; a newer merge
+    # replaces one still waiting, since it publishes newer content.
+    concurrency:
+      group: pages
+      cancel-in-progress: false
     permissions:
       pages: write
       id-token: write

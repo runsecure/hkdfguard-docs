@@ -71,8 +71,9 @@ from PyPI.
 Write `main.py`:
 
 ```python
+from hkdfguard.abstractions import KeyTrackingValue
 from hkdfguard.cryptoprovider.aesgcm256 import AesGcmCryptoProviderFactory
-from hkdfguard.dataencryptionkey import KeyRingBuilder
+from hkdfguard.dataencryptionkey import DefaultFormatProvider, KeyRingBuilder
 from hkdfguard.keywrapping.v1 import NativeHkdfKeyWrapperV1
 
 with (KeyRingBuilder()
@@ -82,14 +83,22 @@ with (KeyRingBuilder()
         .with_key_refresh_interval(60)
         .with_ephemeral_key(1)
         .build()) as ring:
-    protector = ring.create_protector("customer-notes")
-    encrypted = protector.encrypt("The launch code is 0000")
-    print(encrypted)
+    formats = DefaultFormatProvider()
+    aad = b"customer-notes"   # what the value is for
 
-    result = bytearray(protector.get_max_decrypted_length(encrypted))
+    # Encrypt under the current key. encrypt zeroes the plaintext it is given.
+    version, key = ring.get_current()
+    ciphertext = key.encrypt(bytearray(b"The launch code is 0000"), aad=aad)
+    stored = formats.format(KeyTrackingValue(key_version=version, value=ciphertext))
+    print(stored)
+
+    # Decrypt with the key for the value's own version.
+    parsed = formats.parse(stored)
+    dek = ring.get(parsed.key_version)
+    result = bytearray(len(parsed.value))
     try:
-        length = protector.decrypt(encrypted, result)
-        print(result[:length].decode())
+        length = dek.decrypt(parsed.value, result, aad=aad)
+        print(result[:length].decode())   # a str for the demo only
     finally:
         result[:] = bytes(len(result))   # zero it
 ```
@@ -106,14 +115,27 @@ What happened:
 - `build()` asked the native library to generate a DEK and wrap it under your service's key, then
   unwrapped it into memory that is zeroed when the ring closes. The plaintext DEK never touched
   disk.
-- `enc::v1::...` is the stored form. `v1` is the key version, and the rest is the AES-GCM
-  ciphertext.
-- `"customer-notes"` is the protector's **purpose**. It is bound into every value, so a value
-  encrypted by one protector never decrypts under another.
-- `with_key_refresh_interval(60)` re-checks the key every 60 seconds, on a daemon thread. If it
-  stops being available, encryption stops after three failed checks, until access returns.
-- `decrypt` writes UTF-8 bytes into a `bytearray` you can zero. `decrypt_to_str` is simpler, but a
-  `str` can never be cleared from memory, so avoid it for secrets.
+- `ring.get_current()` returns the **current version** and its **data encryption key**. `encrypt`
+  seals the bytes with AES-256-GCM under that key, bound to the AAD, and zeroes the plaintext it was
+  given.
+- `DefaultFormatProvider.format` turns the version and the ciphertext into the stored form,
+  `enc::v1::...`: `v1` is the key version, and the rest is the ciphertext in base64. However you
+  store a value, keep its version with it.
+- To decrypt, `ring.get(version)` returns the key **for the value's own version**, not the current
+  one, so a value encrypted before a rotation still decrypts. A result buffer as long as the
+  ciphertext always fits the plaintext.
+- The **AAD** says what the value is for. It is bound into the ciphertext, so decrypting with
+  different AAD fails authentication: a value encrypted for one purpose never decrypts as another.
+- `with_key_refresh_interval(60)` re-checks the key every 60 seconds. If it stops being available,
+  encryption and decryption stop after three failed checks, until access returns.
+- Plaintext travels in a `bytearray`, so it can be zeroed. A `bytes` or `str` can never be cleared
+  from memory.
+
+:::tip The shortcut: data protectors
+`ring.create_protector("customer-notes")` does these same steps for text values: it takes the
+current key, uses the UTF-8 of its name as the AAD, and formats the result. Values are
+interchangeable: a protector named `customer-notes` decrypts the value above, and the reverse.
+:::
 
 On macOS, the first run shows a keychain prompt for `python3`: choose **Always Allow**. That
 approval covers every script that interpreter runs as that user. For production, ship the
@@ -207,26 +229,31 @@ cleared from memory.
 
 ## 5. Read the secrets back at runtime
 
-Create a protector for the configuration key's purpose, and decrypt the value from wherever your
-configuration lives:
+Each configuration value is an `enc::v1::...` string, encrypted for the configuration key it is
+stored under. Parse it, take the key for its version, and decrypt it with that configuration
+key's AAD:
 
 ```python
 from hkdfguard.abstractions import ProtectedConfigurationPurpose
+from hkdfguard.dataencryptionkey import DefaultFormatProvider
 
 encrypted = config["ConnectionStrings"]["Admin"]   # "enc::v1::..."
-protector = ring.create_protector(ProtectedConfigurationPurpose.for_key("ConnectionStrings:Admin"))
+value = DefaultFormatProvider().parse(encrypted)
+dek = ring.get(value.key_version)
 
-result = bytearray(protector.get_max_decrypted_length(encrypted))
+result = bytearray(len(value.value))
 try:
-    length = protector.decrypt(encrypted, result)
-    # use result[:length]
+    length = dek.decrypt(value.value, result, aad=ProtectedConfigurationPurpose.aad_for("ConnectionStrings:Admin"))
+    # use result[:length], the UTF-8 bytes of the secret
 finally:
     result[:] = bytes(len(result))
 ```
 
-Use the configuration key's full path, joined with `:` as .NET writes it (`ConnectionStrings:Admin`),
-so the same encrypted value decrypts in every port. The key ring must have the release's key file
-registered at the version the pipeline used, here `1`.
+`ProtectedConfigurationPurpose.aad_for` gives the AAD the pipeline bound the value to. Use the
+configuration key's full path, joined with `:` as .NET writes it (`ConnectionStrings:Admin`), so
+the same encrypted value decrypts in every port. A value copied to a different configuration key
+fails authentication. The key ring must have the release's key file registered at the version the
+pipeline used, here `1`.
 
 ## 6. Configure the ring from a settings file
 

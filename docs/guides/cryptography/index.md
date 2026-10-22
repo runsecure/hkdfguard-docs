@@ -136,6 +136,7 @@ value encrypted for one purpose never decrypts under another:
 
 | Used through | AAD (UTF-8) |
 |---|---|
+| A data encryption key, called directly | The bytes you pass. Pass a purpose's UTF-8, or a configuration key's AAD, to stay interchangeable with the rows below. |
 | A data protector named `name` | `name` |
 | A configuration value at `key` | `HkdfGuard.EncryptedConfiguration:` followed by `key` with ASCII letters upper-cased |
 | A protected cache entry named `name` | `HkdfGuard.Cache:` followed by `name` with ASCII letters upper-cased |
