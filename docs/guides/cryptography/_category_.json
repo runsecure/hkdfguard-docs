@@ -1,0 +1,5 @@
+{
+  "label": "Cryptography",
+  "position": 3,
+  "link": { "type": "doc", "id": "guides/cryptography/index" }
+}
