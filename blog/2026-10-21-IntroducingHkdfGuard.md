@@ -82,7 +82,62 @@ The protector name is bound into every ciphertext as associated data, so a value
 - **Runtime keys.** `WithEphemeralKey` generates a key at startup that never touches disk, for values that don't need to outlive the process.
 - **Observability.** OpenTelemetry spans and metrics with the same names in every language.
 
-The Java, Go, Node and Python APIs follow the same shape in their own idioms. Each repository has a getting-started guide that takes one machine from nothing to a hardware-protected key file.
+The Java, Go, Node and Python APIs follow the same shape in their own idioms. The [getting-started guides](/docs/guides/gettingstarted) take one machine, and each language, from nothing to a hardware-protected key file.
+
+## Encrypt before you persist
+
+The deployment pipeline is where secrets are most exposed: they have to be written into configuration somewhere, and the key that protects them has to come from somewhere too. HkdfGuard's **pipeline data protector** closes that gap. Nothing secret reaches a disk or a volume unencrypted, and the key that encrypted it reaches one only after it has been wrapped.
+
+1. **Generate the key in memory.** The pipeline data protector creates a random 32-byte DEK in the pipeline's own memory. It is never written to a file, a variable store or a log.
+2. **Encrypt every secret before it is persisted.** Each secret is encrypted under that DEK and bound to the configuration key it will be stored under, such as `ConnectionStrings:Admin`. Only the `enc::v1::...` ciphertext is ever written into configuration, a volume or a repository. A value later moved to a different setting fails to decrypt.
+3. **Wrap the DEK before it is persisted.** On the target host, the pipeline hands the same 32 bytes to `hkdfguard wrap` on standard input: never as an argument or an environment variable, where process listings and CI logs would record it. The tool wraps it under the host's KEK, and only the wrapped key file is written.
+4. **Zero the DEK.** The protector zeroes the key, and its base64 form, as soon as the wrap completes. From then on, the only copy is the wrapped one.
+
+In .NET:
+
+```csharp
+using var pipeline = new AesGcmPipelineDataProtector(new DefaultFormatProvider(), keyVersion: 1);
+
+// 1-2. Encrypt each secret for the setting it will be stored under; persist only the ciphertext.
+string adminConnection = pipeline.Encrypt("Server=db;Password=s3cret", "ConnectionStrings:Admin");
+
+// 3. Hand the same key to the native tool on standard input, from a buffer that is zeroed afterwards.
+var start = new ProcessStartInfo("hkdfguard") { RedirectStandardInput = true, UseShellExecute = false };
+foreach (var arg in new[] { "wrap", "--service-name", "com.company.orders",
+                            "--key-file-path", "/etc/orders/keys/orders.v1.key", "--dek-stdin" })
+    start.ArgumentList.Add(arg);
+
+using var tool = Process.Start(start)!;
+var base64Key = pipeline.GetKeyAsBase64();
+Span<byte> ascii = stackalloc byte[base64Key.Length];
+try
+{
+    Encoding.ASCII.GetBytes(base64Key, ascii);
+    tool.StandardInput.BaseStream.Write(ascii);
+}
+finally
+{
+    CryptographicOperations.ZeroMemory(ascii);
+}
+tool.StandardInput.Close();
+tool.WaitForExit();
+// 4. Disposing the pipeline protector zeroes the key.
+```
+
+At runtime the application registers that key file at version 1, and its encrypted configuration decrypts as usual. Every language port has the same pipeline protector.
+
+One caveat: a key can only be wrapped on the machine that holds the KEK, so the plaintext DEK has to reach that machine. "Never persisted unwrapped" holds end to end when the pipeline step runs on the target host, or hands the key to it over a protected channel. If your pipeline encrypts on a build server, treat the hop to the host as carrying a secret.
+
+## What's next: cloud key management
+
+The native libraries keep the KEK in hardware on each host. Not every workload has a host of its own, though: containers, serverless functions and autoscaled fleets come and go. For those, the KEK belongs in a managed key service.
+
+The key wrapper is a swappable part of every language library. The rest of the stack (key rings, the AES-256-GCM cipher, encrypted configuration, caches and telemetry) talks to it only through one small interface, and that interface is asynchronous so a key service over the network fits it. So a cloud key wrapper slots in without changing application code.
+
+- **AWS KMS:** work is in progress on a key wrapper that uses an AWS KMS key as the KEK.
+- **Azure Key Vault, Google Cloud KMS and HashiCorp Vault:** similar key wrappers are planned.
+
+With a cloud key wrapper, the KEK's protection becomes the key service's: its access policies, audit logs and HSMs, rather than a single host's TPM. We'll write up the trade-offs, and how the security properties above carry over, as each one lands.
 
 ## Try it
 
