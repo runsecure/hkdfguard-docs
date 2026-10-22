@@ -230,7 +230,13 @@ equally trusted.
 ## Production mode: machine-scoped keys
 
 A user-scoped key suits development, and a service that runs in one user's session. A
-production **policy** makes chosen services machine-scoped instead:
+production **policy** makes chosen services machine-scoped instead.
+
+HkdfGuard installs no daemon of its own. In production mode, *your application* runs as a
+LaunchDaemon, and `hkdfguard` briefly starts a one-off system job of its own while it provisions
+or wraps.
+
+The duties split three ways:
 
 | Role | Does | As |
 |---|---|---|

@@ -2,14 +2,14 @@
 title: Getting started on Linux
 sidebar_label: Linux
 sidebar_position: 3
-description: Install HkdfGuard on Linux, configure a TPM-backed key for your service, wrap your first data encryption key, and run the service under systemd.
+description: Install HkdfGuard on Linux, configure a TPM-backed key for your service, wrap your first data encryption key, and use it from your application.
 ---
 
 # Getting started on Linux
 
 This guide takes one Linux host from nothing to a working setup: the HkdfGuard native library
 installed, the host configured to keep keys in its TPM, a key (KEK) provisioned for your
-service, a first key file, and the service running under systemd.
+service, a first key file, and your application using it.
 
 New to HkdfGuard? Read the [overview](index.md) first.
 
@@ -140,7 +140,7 @@ The library opens `/dev/tpmrm0`, which belongs to the `tss` group on most distri
 ls -l /dev/tpmrm0    # crw-rw---- tss tss ...
 ```
 
-You'll add your service to `tss` in its systemd unit in [step 7](#7-run-the-service-under-systemd).
+You'll add your application's account to `tss` in [step 7](#7-use-the-key-from-your-application).
 
 ### Create the derivation secret
 
@@ -295,27 +295,18 @@ user can read both through `/proc`. Pipe it with `printf`, a shell builtin, not 
 `echo`.
 :::
 
-## 7. Run the service under systemd
+## 7. Use the key from your application
 
-The service needs the TPM (`tss`), the derivation secret (`hkdfguard`) and its key file (its own
-group). Under production it is the *application*: it reads and unwraps key files, and never
-writes them.
+HkdfGuard runs no daemon: the library loads into your application's process. Your application's
+account needs the TPM (`tss`), the derivation secret (`hkdfguard`) and read access to its key file
+(its own group, through `wrap --group`). Under production it is the *application*: it reads and
+unwraps key files, and never writes them.
 
-```ini
-[Service]
-User=myapp
-Group=myapp
-SupplementaryGroups=tss hkdfguard
-ExecStart=/usr/local/bin/myapp
-
-# Keep key material out of crash dumps, debuggers and other users' view.
-LimitCORE=0
-ProtectProc=invisible
-NoNewPrivileges=yes
-ProtectSystem=strict
-ReadOnlyPaths=/etc/hkdfguard
-# Don't set PrivateDevices=yes: it hides /dev/tpmrm0.
+```sh
+sudo usermod -aG tss,hkdfguard myapp
 ```
+
+The account picks up new groups the next time it starts a session.
 
 **With an HkdfGuard language library** (.NET, Java, Go, Node or Python), configure the service
 name and the key file's full path, `/etc/myapp/keys/myapp.v1.key`. The library loads
@@ -394,18 +385,16 @@ it.
 ## Troubleshooting
 
 The library returns only a status code; it doesn't print reasons. The tool does, so run it
-**as the service's user, with the service's groups**, for the same service name:
+**as your application's account**, for the same service name:
 
 ```sh
-sudo systemd-run --pty --uid=myapp --gid=myapp \
-    -p SupplementaryGroups="tss hkdfguard" \
-    hkdfguard provision --service-name com.example.myapp
+sudo -u myapp hkdfguard provision --service-name com.example.myapp
 ```
 
 | Status | Meaning | Fix |
 |---|---|---|
 | -9 | The policy can't be used: badly owned, too broadly writable, or malformed. Every call fails until it is fixed. | Run the tool to see the reason. The policy and every folder above it must be root-owned and not group- or other-writable. |
-| -3 | No allowed provider is set up | Check `/dev/tpmrm0` access (`tss`) and that the derivation secret exists |
+| -3 | No allowed provider is set up | Check that the account is in `tss` and that the derivation secret exists |
 | -4 | A provider is present but failing | Run the tool for the exact reason: often the derivation secret's permissions |
 | -17 | The service has no key | `provision` it. With `require_pinned_names`, add its pinned Name to the policy. |
 | -16 | The key file was wrapped under a different key | Use the service name it was made for, or wrap it again |
