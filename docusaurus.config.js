@@ -7,9 +7,12 @@ const config = {
   tagline: 'Documentation and blog for HkdfGuard',
   favicon: 'img/favicon.ico',
   url: 'https://runsecure.github.io',
-  baseUrl: '/hkdfguard-docs/',
+  // Served from the org site (runsecure/runsecure.github.io), not this repo's project site.
+  baseUrl: '/',
   organizationName: 'runsecure',
-  projectName: 'hkdfguard-docs',
+  projectName: 'runsecure.github.io',
+  deploymentBranch: 'main',
+  trailingSlash: false,
   onBrokenLinks: 'throw',
   i18n: {defaultLocale: 'en', locales: ['en']},
   presets: [
