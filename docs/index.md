@@ -10,6 +10,7 @@ Welcome to the documentation hub for the HkdfGuard projects.
 - [Separation of duties](guides/separationofduties.md): production and developer modes
 - [Cryptography](guides/cryptography/index.md): how keys are wrapped on [Windows](guides/cryptography/windows.md), [macOS](guides/cryptography/macos.md) and [Linux](guides/cryptography/linux.md), and how data is encrypted
 - [Process hardening](guides/processhardening.md): what the hardening call does on each platform, and its flag
+- [External secrets](guides/externalsecrets.md): create, fingerprint, pin and deliver the key for Linux's external-secret provider
 - [Glossary](guides/glossary.md)
 
 ## Contributing
